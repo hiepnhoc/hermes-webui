@@ -10050,6 +10050,94 @@ function _topbarMessageMetaText(){
   // branch above surfaces the raw server total, and only as "loaded of total".
   return t('n_messages',loadedCount);
 }
+let _titlebarUsageFetchSid='';
+let _titlebarUsageFetchInFlight=null;
+let _titlebarUsageFetchAt=0;
+function _titlebarCompactNumber(value){
+  const n=Number(value||0);
+  if(!Number.isFinite(n)||n<=0)return '0';
+  try{return new Intl.NumberFormat(undefined,{notation:n>=10000?'compact':'standard',maximumFractionDigits:n>=10000?1:0}).format(Math.round(n));}
+  catch(_){return String(Math.round(n));}
+}
+function _titlebarUsageTotal(usage){
+  if(!usage||typeof usage!=='object')return 0;
+  const explicit=Number(usage.total_tokens??usage.total??0)||0;
+  if(explicit>0)return explicit;
+  return (Number(usage.input_tokens??usage.input??0)||0)+(Number(usage.output_tokens??usage.output??0)||0);
+}
+function _titlebarUsageFromSession(){
+  const s=S.session||{};
+  const u=(S.lastUsage&&typeof S.lastUsage==='object')?S.lastUsage:{};
+  const input=Number(u.input_tokens??s.input_tokens??0)||0;
+  const output=Number(u.output_tokens??s.output_tokens??0)||0;
+  const total=Number(u.total_tokens??s.total_tokens??(input+output))||0;
+  const estimated=Number(u.estimated_cost??s.estimated_cost??0)||0;
+  return {input_tokens:input,output_tokens:output,total_tokens:total,estimated_cost:estimated,model:(u.model||s.model||'')};
+}
+function updateTitlebarTokenUsage(usage){
+  const root=$('titlebarTokenUsage');
+  const value=$('titlebarTokenUsageValue');
+  if(!root||!value)return;
+  if(!S.session){
+    value.textContent='—';
+    root.classList.remove('has-usage','loading');
+    root.title='No active session';
+    return;
+  }
+  const u=usage&&typeof usage==='object'?usage:_titlebarUsageFromSession();
+  const input=Number(u.input_tokens??u.input??0)||0;
+  const output=Number(u.output_tokens??u.output??0)||0;
+  const total=_titlebarUsageTotal(u);
+  const cost=Number(u.estimated_cost??u.cost_usd??0)||0;
+  value.textContent=total>0?_titlebarCompactNumber(total):'0';
+  root.classList.toggle('has-usage',total>0||cost>0);
+  root.classList.remove('loading');
+  const parts=[
+    `Total tokens: ${Math.round(total).toLocaleString()}`,
+    `Input: ${Math.round(input).toLocaleString()}`,
+    `Output: ${Math.round(output).toLocaleString()}`,
+  ];
+  if(cost>0)parts.push(`Estimated cost: $${cost.toFixed(4)}`);
+  if(u.model)parts.push(`Model: ${u.model}`);
+  root.title=parts.join('\n');
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+}
+async function refreshTitlebarTokenUsage(options){
+  if(!S.session||!S.session.session_id){updateTitlebarTokenUsage(null);return null;}
+  const sid=S.session.session_id;
+  updateTitlebarTokenUsage(_titlebarUsageFromSession());
+  const force=!!(options&&options.force);
+  const now=Date.now();
+  if(!force&&_titlebarUsageFetchSid===sid&&now-_titlebarUsageFetchAt<2000)return null;
+  if(_titlebarUsageFetchInFlight&&_titlebarUsageFetchSid===sid)return _titlebarUsageFetchInFlight;
+  _titlebarUsageFetchSid=sid;
+  _titlebarUsageFetchAt=now;
+  const root=$('titlebarTokenUsage');
+  if(root)root.classList.add('loading');
+  _titlebarUsageFetchInFlight=(async()=>{
+    try{
+      const data=await api(`/api/session/usage?session_id=${encodeURIComponent(sid)}`,{timeoutToast:false});
+      if(!S.session||S.session.session_id!==sid)return null;
+      if(data&&typeof data==='object'){
+        S.lastUsage={...(S.lastUsage||{}),...data};
+        updateTitlebarTokenUsage(data);
+      }
+      return data||null;
+    }catch(_){
+      if(S.session&&S.session.session_id===sid)updateTitlebarTokenUsage(_titlebarUsageFromSession());
+      return null;
+    }finally{
+      if(_titlebarUsageFetchSid===sid)_titlebarUsageFetchInFlight=null;
+      const el=$('titlebarTokenUsage');
+      if(el)el.classList.remove('loading');
+    }
+  })();
+  return _titlebarUsageFetchInFlight;
+}
+if(typeof window!=='undefined'){
+  window.updateTitlebarTokenUsage=updateTitlebarTokenUsage;
+  window.refreshTitlebarTokenUsage=refreshTitlebarTokenUsage;
+}
 function syncTopbar(){
   if(!S.session){
     document.title=assistantDisplayName();
@@ -10065,6 +10153,7 @@ function syncTopbar(){
       }
     }
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+    updateTitlebarTokenUsage(null);
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
@@ -10094,6 +10183,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+  refreshTitlebarTokenUsage({force:false});
   if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.

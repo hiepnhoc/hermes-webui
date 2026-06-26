@@ -10763,6 +10763,208 @@ def _handle_insights(handler, parsed) -> bool:
     })
 
 
+def _handle_usage_monitor(handler, parsed) -> bool:
+    """Return practical Hermes usage monitor stats by model/source/tool/session.
+
+    This intentionally reports local Hermes usage only. It cannot split usage by
+    upstream custom-provider API key when key rotation happens outside Hermes.
+    """
+    import collections
+    import time as _time
+
+    query = parse_qs(parsed.query)
+    try:
+        days = min(max(int(query.get("days", ["7"])[0]), 1), 365)
+    except (ValueError, TypeError):
+        days = 7
+
+    now = _time.time()
+    today = _time.localtime(now)
+    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
+    cutoff = today_midnight - ((days - 1) * 86400)
+
+    def _safe_int(value) -> int:
+        try:
+            return max(int(float(value or 0)), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_float(value) -> float:
+        if value is None:
+            return 0.0
+        try:
+            if isinstance(value, str):
+                value = value.strip().replace("$", "").replace(",", "")
+                if not value:
+                    return 0.0
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _fmt_ts(ts) -> str:
+        try:
+            ts = float(ts or 0)
+            if ts <= 0:
+                return ""
+            return _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ts))
+        except Exception:
+            return ""
+
+    totals = {"sessions": 0, "messages": 0, "api_calls": 0, "tool_calls": 0,
+              "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost": 0.0}
+    model_stats = {}
+    source_stats = {}
+    top_sessions = []
+    seen_sessions = set()
+
+    def _add_session(*, sid, title, source, model, provider, messages, api_calls, tool_calls,
+                     input_tokens, output_tokens, cost, updated):
+        sid = str(sid or "").strip()
+        if sid and sid in seen_sessions:
+            return
+        if sid:
+            seen_sessions.add(sid)
+        source = str(source or "unknown")
+        model = str(model or "unknown")
+        provider = str(provider or "")
+        messages = _safe_int(messages)
+        api_calls = _safe_int(api_calls)
+        tool_calls = _safe_int(tool_calls)
+        input_tokens = _safe_int(input_tokens)
+        output_tokens = _safe_int(output_tokens)
+        total_tokens = input_tokens + output_tokens
+        cost = _safe_float(cost)
+        totals["sessions"] += 1
+        totals["messages"] += messages
+        totals["api_calls"] += api_calls
+        totals["tool_calls"] += tool_calls
+        totals["input_tokens"] += input_tokens
+        totals["output_tokens"] += output_tokens
+        totals["total_tokens"] += total_tokens
+        totals["cost"] += cost
+        mb = model_stats.setdefault((model, provider), {"model": model, "provider": provider, "sessions": 0, "messages": 0, "api_calls": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost": 0.0, "last_ts": 0})
+        sb = source_stats.setdefault(source, {"source": source, "sessions": 0, "messages": 0, "api_calls": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost": 0.0})
+        for bucket in (mb, sb):
+            bucket["sessions"] += 1
+            bucket["messages"] += messages
+            bucket["api_calls"] += api_calls
+            bucket["tool_calls"] += tool_calls
+            bucket["input_tokens"] += input_tokens
+            bucket["output_tokens"] += output_tokens
+            bucket["total_tokens"] += total_tokens
+            bucket["cost"] += cost
+        try:
+            mb["last_ts"] = max(float(mb.get("last_ts") or 0), float(updated or 0))
+        except Exception:
+            pass
+        top_sessions.append({"id": sid, "title": title or sid or "Untitled", "source": source,
+                             "model": model, "provider": provider, "messages": messages,
+                             "api_calls": api_calls, "tool_calls": tool_calls,
+                             "input_tokens": input_tokens, "output_tokens": output_tokens,
+                             "total_tokens": total_tokens, "cost": round(cost, 6),
+                             "updated": _fmt_ts(updated), "updated_ts": float(updated or 0) if updated else 0})
+
+    # WebUI JSON session index
+    idx_path = SESSION_DIR / "_index.json"
+    try:
+        idx = json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.exists() else []
+    except Exception:
+        idx = []
+    for entry in idx if isinstance(idx, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        updated = entry.get("updated_at") or entry.get("last_message_at") or entry.get("created_at") or 0
+        if updated and float(updated or 0) < cutoff:
+            continue
+        source = entry.get("source_label") or entry.get("session_source") or entry.get("raw_source") or entry.get("source_tag") or "webui"
+        _add_session(
+            sid=entry.get("session_id"), title=entry.get("title"), source=source,
+            model=entry.get("model"), provider=entry.get("model_provider"),
+            messages=entry.get("message_count"), api_calls=entry.get("user_message_count") or entry.get("message_count"),
+            tool_calls=entry.get("tool_call_count") or 0,
+            input_tokens=entry.get("input_tokens"), output_tokens=entry.get("output_tokens"),
+            cost=entry.get("estimated_cost"), updated=updated,
+        )
+
+    tool_counter = collections.Counter()
+    tool_sessions = collections.defaultdict(set)
+
+    # Hermes state.db sessions + tool names
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if db_path and db_path.exists():
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, source, model, billing_provider, message_count, tool_call_count,
+                           api_call_count, input_tokens, output_tokens, estimated_cost_usd,
+                           actual_cost_usd, title, started_at, ended_at
+                    FROM sessions
+                    WHERE (COALESCE(started_at,0) >= ? OR COALESCE(ended_at,0) >= ?)
+                """, (cutoff, cutoff))
+                for row in cur.fetchall():
+                    updated = row["ended_at"] or row["started_at"] or 0
+                    _add_session(
+                        sid=row["id"], title=row["title"], source=row["source"] or "cli",
+                        model=row["model"], provider=row["billing_provider"] or "",
+                        messages=row["message_count"], api_calls=row["api_call_count"],
+                        tool_calls=row["tool_call_count"], input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"],
+                        cost=row["actual_cost_usd"] if row["actual_cost_usd"] is not None else row["estimated_cost_usd"],
+                        updated=updated,
+                    )
+                cur.execute("""
+                    SELECT m.session_id, COALESCE(m.tool_name, '') AS tool_name, COUNT(*) AS calls
+                    FROM messages m
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE COALESCE(m.tool_name, '') != ''
+                      AND (COALESCE(s.started_at,0) >= ? OR COALESCE(s.ended_at,0) >= ?)
+                    GROUP BY m.session_id, m.tool_name
+                """, (cutoff, cutoff))
+                for row in cur.fetchall():
+                    name = row["tool_name"] or "unknown"
+                    calls = _safe_int(row["calls"])
+                    tool_counter[name] += calls
+                    tool_sessions[name].add(row["session_id"])
+    except Exception:
+        logger.debug("Failed to include state.db usage monitor data", exc_info=True)
+
+    models = []
+    for bucket in model_stats.values():
+        row = dict(bucket)
+        row["cost"] = round(_safe_float(row.get("cost")), 6)
+        row["last_used"] = _fmt_ts(row.pop("last_ts", 0))
+        models.append(row)
+    models.sort(key=lambda r: (-r.get("total_tokens", 0), -r.get("sessions", 0), r.get("model", "")))
+
+    sources = []
+    for bucket in source_stats.values():
+        row = dict(bucket)
+        row["cost"] = round(_safe_float(row.get("cost")), 6)
+        sources.append(row)
+    sources.sort(key=lambda r: (-r.get("total_tokens", 0), -r.get("sessions", 0), r.get("source", "")))
+
+    top_sessions.sort(key=lambda r: (-r.get("total_tokens", 0), -r.get("updated_ts", 0)))
+    for row in top_sessions:
+        row.pop("updated_ts", None)
+
+    tools = [{"tool": name, "calls": count, "sessions": len(tool_sessions.get(name, set()))}
+             for name, count in tool_counter.most_common(25)]
+
+    totals["cost"] = round(_safe_float(totals.get("cost")), 6)
+    return j(handler, {
+        "period_days": days,
+        "generated_at": _fmt_ts(now),
+        "totals": totals,
+        "models": models[:50],
+        "sources": sources[:25],
+        "tools": tools,
+        "top_sessions": top_sessions[:25],
+    })
+
+
 def _project_os_workspace_read(repo_root: Path, rel: str) -> dict | None:
     try:
         return read_file_content(repo_root, rel)
@@ -11930,6 +12132,8 @@ def handle_get(handler, parsed) -> bool:
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
+    if parsed.path == "/api/usage-monitor":
+        return _handle_usage_monitor(handler, parsed)
     if parsed.path == "/api/project-os/dashboard":
         return _handle_project_os_dashboard(handler, parsed)
 

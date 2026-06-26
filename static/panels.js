@@ -42,9 +42,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', usageMonitor: 'tab_usage_monitor', logs: 'tab_logs', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','usageMonitor','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -63,6 +63,16 @@ function syncAppTitlebar() {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
     subText = String(vis.length);
+    const usage = (S.lastUsage && typeof S.lastUsage === 'object') ? S.lastUsage : {};
+    const inputTok = Number(usage.input_tokens ?? S.session.input_tokens ?? 0) || 0;
+    const outputTok = Number(usage.output_tokens ?? S.session.output_tokens ?? 0) || 0;
+    const totalTok = Number(usage.total_tokens ?? S.session.total_tokens ?? (inputTok + outputTok)) || 0;
+    if (totalTok > 0) {
+      const fmt = (typeof _titlebarCompactNumber === 'function')
+        ? _titlebarCompactNumber(totalTok)
+        : Math.round(totalTok).toLocaleString();
+      subText = subText ? `${subText} · ${fmt} tokens` : `${fmt} tokens`;
+    }
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
@@ -420,6 +430,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'profiles') await loadProfilesPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
+  if (nextPanel === 'usageMonitor') await loadUsageMonitor();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -4656,6 +4667,84 @@ function _renderSkillUsage(d) {
     return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(name)}">${esc(name)}</span><span>${useCount}</span><span>${viewCount}</span><span>${patchCount}</span><span>${share}%</span></div>`;
   }).join('');
   return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="skill-usage-grid" style="margin-bottom:8px"><div><span>${esc(t('insights_skill_usage_total'))}</span><strong>${totalInvocations.toLocaleString()}</strong></div><div><span>${esc(t('insights_skill_usage_skills_used'))}</span><strong>${uniqueUsed}/${skillNames.length}</strong></div></div><div class="insights-table skill-usage-table"><div class="insights-table-head"><span>${esc(t('insights_skill_usage_col_skill'))}</span><span>${esc(t('insights_skill_usage_col_uses'))}</span><span>${esc(t('insights_skill_usage_col_views'))}</span><span>${esc(t('insights_skill_usage_col_patches'))}</span><span>${esc(t('insights_skill_usage_col_share'))}</span></div>${rows}</div><div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_skill_usage_footer'))}</div></div>`;
+}
+
+
+async function loadUsageMonitor(animate) {
+  const box = $('usageMonitorContent');
+  const refreshBtn = $('usageMonitorRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
+  const period = ($('usageMonitorPeriod') || {}).value || '7';
+  try {
+    const data = await api(`/api/usage-monitor?days=${period}`);
+    _renderUsageMonitor(data, box);
+  } catch (e) {
+    box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
+  } finally {
+    if (refreshBtn) { refreshBtn.style.opacity = ''; refreshBtn.disabled = false; }
+  }
+}
+
+function _usageMonitorFmtNum(n) { return Number(n || 0).toLocaleString(); }
+function _usageMonitorFmtTokens(n) {
+  const value = Number(n || 0);
+  return value >= 1e9 ? (value/1e9).toFixed(2) + 'B' : value >= 1e6 ? (value/1e6).toFixed(1) + 'M' : value >= 1e3 ? (value/1e3).toFixed(1) + 'K' : _usageMonitorFmtNum(value);
+}
+function _usageMonitorFmtCost(c) {
+  const value = Number(c || 0);
+  return value > 0 ? '$' + value.toFixed(value < 1 ? 4 : 2) : 'N/A';
+}
+function _usageMonitorTable(title, rows, cols, emptyText) {
+  if (!Array.isArray(rows) || !rows.length) return `<div class="insights-card"><div class="insights-card-title">${esc(title)}</div><div class="insights-empty">${esc(emptyText || 'No usage data yet')}</div></div>`;
+  return `<div class="insights-card"><div class="insights-card-title">${esc(title)}</div><div class="insights-table usage-monitor-table"><div class="insights-table-head">${cols.map(c=>`<span>${esc(c.label)}</span>`).join('')}</div>${rows.map(row=>`<div class="insights-table-row">${cols.map(c=>`<span title="${esc(String(row[c.key] ?? ''))}">${c.render ? c.render(row[c.key], row) : esc(String(row[c.key] ?? ''))}</span>`).join('')}</div>`).join('')}</div></div>`;
+}
+function _renderUsageMonitor(d, box) {
+  const totals = d.totals || {};
+  const cards = [
+    {label:'Total tokens', value:_usageMonitorFmtTokens(totals.total_tokens), icon:li('cpu',18)},
+    {label:'Input / Output', value:`${_usageMonitorFmtTokens(totals.input_tokens)} / ${_usageMonitorFmtTokens(totals.output_tokens)}`, icon:li('activity',18)},
+    {label:'Sessions', value:_usageMonitorFmtNum(totals.sessions), icon:li('message-square',18)},
+    {label:'Tool calls', value:_usageMonitorFmtNum(totals.tool_calls), icon:li('terminal',18)},
+    {label:'Messages', value:_usageMonitorFmtNum(totals.messages), icon:li('hash',18)},
+    {label:'Est. cost', value:_usageMonitorFmtCost(totals.cost), icon:li('dollar-sign',18)},
+  ];
+  const modelTable = _usageMonitorTable('Models', d.models, [
+    {key:'model', label:'Model'},
+    {key:'provider', label:'Provider'},
+    {key:'total_tokens', label:'Tokens', render:v=>_usageMonitorFmtTokens(v)},
+    {key:'sessions', label:'Sessions', render:v=>_usageMonitorFmtNum(v)},
+    {key:'messages', label:'Messages', render:v=>_usageMonitorFmtNum(v)},
+    {key:'tool_calls', label:'Tools', render:v=>_usageMonitorFmtNum(v)},
+    {key:'last_used', label:'Last used'},
+  ]);
+  const sourceTable = _usageMonitorTable('Sources / where it was used', d.sources, [
+    {key:'source', label:'Source'},
+    {key:'total_tokens', label:'Tokens', render:v=>_usageMonitorFmtTokens(v)},
+    {key:'sessions', label:'Sessions', render:v=>_usageMonitorFmtNum(v)},
+    {key:'messages', label:'Messages', render:v=>_usageMonitorFmtNum(v)},
+    {key:'tool_calls', label:'Tools', render:v=>_usageMonitorFmtNum(v)},
+  ]);
+  const toolTable = _usageMonitorTable('Top tools / used for what', d.tools, [
+    {key:'tool', label:'Tool'},
+    {key:'calls', label:'Calls', render:v=>_usageMonitorFmtNum(v)},
+    {key:'sessions', label:'Sessions', render:v=>_usageMonitorFmtNum(v)},
+  ]);
+  const sessionTable = _usageMonitorTable('Top sessions', d.top_sessions, [
+    {key:'title', label:'Session'},
+    {key:'source', label:'Source'},
+    {key:'model', label:'Model'},
+    {key:'total_tokens', label:'Tokens', render:v=>_usageMonitorFmtTokens(v)},
+    {key:'messages', label:'Messages', render:v=>_usageMonitorFmtNum(v)},
+    {key:'tool_calls', label:'Tools', render:v=>_usageMonitorFmtNum(v)},
+    {key:'updated', label:'Updated'},
+  ]);
+  box.innerHTML = `
+    <div class="insights-grid">${cards.map(c=>`<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${esc(c.value)}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}</div>
+    <div class="insights-card"><div class="insights-card-title">Usage Monitor</div><div style="color:var(--muted);font-size:12px">Last ${esc(String(d.period_days || 7))} day(s). Local Hermes session usage only; custom-provider API-key split is upstream and not visible here.</div></div>
+    <div class="insights-row insights-usage-grid">${modelTable}${sourceTable}</div>
+    <div class="insights-row insights-usage-grid">${toolTable}${sessionTable}</div>
+  `;
 }
 
 function _renderInsights(d, box, wikiStatus, skillUsage) {
