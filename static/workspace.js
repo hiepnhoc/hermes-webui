@@ -395,9 +395,13 @@ function switchWorkspacePanelTab(tab){
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
 }
 
-function _loadWorkspacePanelTodos(){
+async function _loadWorkspacePanelTodos(){
   const panel = $('workspaceTodosPanel');
   if(!panel) return;
+  // Keep the workspace Todos tab scoped to the currently loaded session. The
+  // aggregate `/api/todos?all_profiles=1` endpoint is useful for a dashboard,
+  // but this right-panel tab sits beside the active transcript and should not
+  // mix tasks from other chats/sessions.
   let todos = [];
   try{
     if(S && Array.isArray(S.todos)){

@@ -2733,19 +2733,44 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
+            # Collect models from `models` (dict/list) plus optional `model` single.
+            # Hermes custom_providers commonly store per-model metadata as:
+            #   models:
+            #     gpt-5.6-sol:
+            #       context_length: 400000
+            # Settings must mirror /api/models instead of showing only the default.
             cp_models = []
-            if isinstance(cp.get("models"), list):
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
-            elif cp.get("model"):
-                cp_models = [{"id": cp["model"], "label": cp["model"]}]
-            # Check for env var reference (${VAR_NAME} pattern)
+            seen_model_ids = set()
+
+            def _append_cp_model(raw_model):
+                model_id = str(raw_model or "").strip()
+                if model_id and model_id not in seen_model_ids:
+                    seen_model_ids.add(model_id)
+                    cp_models.append({"id": model_id, "label": model_id})
+
+            _append_cp_model(cp.get("model"))
+            cfg_models = cp.get("models")
+            if isinstance(cfg_models, dict):
+                for model_id in cfg_models.keys():
+                    _append_cp_model(model_id)
+            elif isinstance(cfg_models, list):
+                for item in cfg_models:
+                    if isinstance(item, dict):
+                        _append_cp_model(item.get("id") or item.get("model") or item.get("name"))
+                    else:
+                        _append_cp_model(item)
+
+            # Check for env var reference (${VAR_NAME} pattern) or key_env.
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
-            # Replace env var reference to check actual value
+            # Replace env var reference to check actual value.
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(_thread_local_env_value(env_var).strip())
+            if not cp_has_key:
+                cp_key_env = str(cp.get("key_env") or "").strip()
+                if cp_key_env:
+                    cp_has_key = bool(_thread_local_env_value(cp_key_env).strip())
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:

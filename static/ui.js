@@ -9192,7 +9192,9 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const sid = S.session.session_id;
+    const profileScopeQS = (typeof _sessionDetailProfileScopeQS === 'function') ? _sessionDetailProfileScopeQS(sid) : '';
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}${profileScopeQS}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;

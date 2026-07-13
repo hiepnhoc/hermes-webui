@@ -3797,9 +3797,58 @@ async function loadKanbanTask(taskId){
 // in ui.js): repeated emissions that yield identical DOM are no-ops.
 // Coalescing of bursty live updates happens upstream in
 // scheduleTodosRefresh().
-function loadTodos() {
+async function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
+
+  // The sidebar Todos panel is a global oversight surface: include todo
+  // snapshots from every agent profile by default, matching the Chat sidebar's
+  // all-profile conversation view. Fall back to the in-session snapshot if the
+  // aggregate endpoint is unavailable (older server / offline dev fixture).
+  try {
+    const data = await api('/api/todos?all_profiles=1&exclude_hidden=1&limit=100');
+    const items = Array.isArray(data && data.items) ? data.items : [];
+    const hash = JSON.stringify(items.map(item => [
+      item.session_id,
+      item.profile,
+      item.open_count,
+      item.todo_count,
+      item.todo_state && item.todo_state.todos,
+    ]));
+    if (typeof _todosLastRenderedHash !== 'undefined' && hash === _todosLastRenderedHash) return;
+    if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = hash;
+    if (!items.length) {
+      panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+      return;
+    }
+    const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
+    const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
+    panel.innerHTML = items.map(item => {
+      const todos = (item.todo_state && Array.isArray(item.todo_state.todos)) ? item.todo_state.todos : [];
+      const title = item.title || 'Untitled';
+      const profile = item.profile || 'default';
+      const sid = item.session_id || '';
+      const source = item.is_cli_session ? 'CLI' : 'WebUI';
+      return `<section style="padding:8px 0 10px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;min-width:0">
+          <span style="font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:1px 5px;flex-shrink:0">${esc(profile)}</span>
+          <button type="button" onclick="loadSession('${esc(sid)}')" style="all:unset;cursor:pointer;color:var(--text);font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1" title="${esc(title)}">${esc(title)}</button>
+          <span style="font-size:10px;color:var(--muted);opacity:.65;flex-shrink:0">${esc(source)}</span>
+        </div>
+        ${todos.map(td => {
+          const s = td.status || 'pending';
+          return `<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0 4px 8px;">
+            <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[s]||'var(--muted)'}">${statusIcon[s]||li('square',14)}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;color:${s==='completed'?'var(--muted)':'var(--text)'};${s==='completed'?'text-decoration:line-through;opacity:.55':''};line-height:1.35">${esc(td.content||'')}</div>
+              <div style="font-size:9px;color:var(--muted);margin-top:2px;opacity:.55">${esc(td.id||'')} · ${esc(s)}</div>
+            </div>
+          </div>`;
+        }).join('')}
+      </section>`;
+    }).join('');
+    return;
+  } catch (_) {}
 
   let todos;
   if (S.todoStateMeta) {

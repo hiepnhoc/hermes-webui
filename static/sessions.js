@@ -1442,7 +1442,7 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(_sessionSourceFilter==='cli') _sessionSourceFilter='all';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -1762,7 +1762,8 @@ async function loadSession(sid){
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const profileScopeQS = _sessionDetailProfileScopeQS(sid);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0${profileScopeQS}`);
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
@@ -2452,6 +2453,7 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
+  if (filter === 'all') return `All conversations (${n})`;
   return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
 }
 
@@ -2461,7 +2463,8 @@ function _clearSessionSourceTabCounts() {
 }
 
 function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+  if(!window._showCliSessions) return 'webui';
+  return _sessionSourceFilter === 'all' ? null : _sessionSourceFilter;
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2479,7 +2482,8 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  const sidebarSource = _requestedSessionSidebarSource();
+  if(sidebarSource) qs.set('sidebar_source', sidebarSource);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -2510,7 +2514,7 @@ function _setActiveProjectFilter(projectId) {
 }
 
 function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
+  const next = filter === 'cli' ? 'cli' : (filter === 'webui' ? 'webui' : 'all');
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
@@ -2524,7 +2528,12 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    // The historical default was "webui", which hid CLI/gateway conversations
+    // behind a second tab on every fresh/new-chat view. Treat that old default
+    // as "all" so the sidebar loads every conversation unless the user has
+    // explicitly picked the CLI-only bucket.
+    if (raw === 'cli') _sessionSourceFilter = 'cli';
+    else if (raw === 'all' || raw === 'webui') _sessionSourceFilter = 'all';
   } catch (_e) {}
 }
 
@@ -2871,11 +2880,35 @@ function _deferWorkspaceRefreshForSession(sid, opts={}){
   },150);
 }
 
+function _sessionDetailProfileScopeQS(sid=null){
+  // Session list/detail can be global across Hermes profiles. Foreign-profile
+  // sessions require all_profiles=1 on every /api/session detail request, not
+  // just the initial metadata probe, otherwise lazy message/model refreshes 404.
+  if(typeof _showAllProfiles !== 'undefined' && _showAllProfiles) return '&all_profiles=1';
+  const targetSid = sid || (S.session && S.session.session_id) || '';
+  let session = null;
+  if(S.session && (!targetSid || S.session.session_id === targetSid)) session = S.session;
+  if(!session && typeof _sessionListSnapshotById !== 'undefined'
+      && _sessionListSnapshotById && typeof _sessionListSnapshotById.get === 'function'){
+    session = _sessionListSnapshotById.get(targetSid) || null;
+  }
+  const profile = (session && typeof session.profile === 'string' && session.profile.trim())
+    ? session.profile.trim()
+    : 'default';
+  const active = (S && typeof S.activeProfile === 'string' && S.activeProfile.trim())
+    ? S.activeProfile.trim()
+    : 'default';
+  return (typeof _profileMatchesActiveProfile === 'function' && !_profileMatchesActiveProfile(profile, active))
+    ? '&all_profiles=1'
+    : '';
+}
+
 function _resolveSessionModelForDisplaySoon(sid){
   if(!sid) return;
   _deferSessionSideEffect(sid,async()=>{
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
+      const profileScopeQS = _sessionDetailProfileScopeQS(sid);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1${profileScopeQS}`);
       const model=data&&data.session&&data.session.model;
       const provider=data&&data.session&&data.session.model_provider;
       if(!model||!S.session||S.session.session_id!==sid) return;
@@ -3035,8 +3068,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
+    const profileScopeQS = _sessionDetailProfileScopeQS(sid);
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}${profileScopeQS}`,
       {timeoutMs:120000}
     );
   } finally {
@@ -3535,8 +3569,9 @@ async function _loadOlderMessages() {
     // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
     // newly exposed head is what we expose to the user.
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
+    const profileScopeQS = _sessionDetailProfileScopeQS(sid);
     const data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}${profileScopeQS}`,
       {timeoutMs:120000}
     );
     // Guard: api() may have redirected (401) and returned undefined.
@@ -3583,7 +3618,7 @@ async function _loadOlderMessages() {
       // correctness-preserving alternative. Same guards reapplied because
       // we just awaited again.
       const fallback = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}${profileScopeQS}`,
         {timeoutMs:120000}
       );
       if (!fallback || !fallback.session) { _loadingOlder = false; return; }
@@ -3697,7 +3732,8 @@ async function _ensureAllMessagesLoaded() {
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
+    const profileScopeQS = _sessionDetailProfileScopeQS(sid);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${profileScopeQS}`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
     // Session may have been switched while we awaited. Bail rather than
@@ -3750,7 +3786,7 @@ let _allProjects = [];  // cached project list
 const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
-let _showAllProfiles = false;  // false = filter to active profile only
+let _showAllProfiles = true;  // true = show conversations from every profile by default
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
@@ -3758,13 +3794,13 @@ let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched unt
 let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _sessionSourceFilter = 'all';  // 'all' shows WebUI + CLI/gateway conversations together by default
 
 function _restoreShowAllProfiles(){
   try{
     const raw=localStorage.getItem(SHOW_ALL_PROFILES_STORAGE_KEY);
-    _showAllProfiles = raw === '1' || raw === 'true';
-  }catch(_e){ _showAllProfiles = false; }
+    _showAllProfiles = raw === null ? true : (raw === '1' || raw === 'true');
+  }catch(_e){ _showAllProfiles = true; }
 }
 
 function _setShowAllProfiles(enabled){
@@ -5646,7 +5682,8 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
+    const profileScopeQS = _sessionDetailProfileScopeQS(sid);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0${profileScopeQS}`,{timeoutToast:false});
     if(!data || !data.session) return 'unchanged';
     if(!S.session || S.session.session_id !== sid) return 'skipped';
     if(S.busy || S.activeStreamId) return 'skipped';
@@ -7241,16 +7278,19 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+  if((_sessionSourceFilter==='cli' || _sessionSourceFilter==='all') && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
   const showCliOnly=_sessionSourceFilter==='cli';
+  const showAllSources=_sessionSourceFilter==='all';
   const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
   return {
     cliSessionCount,
-    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
-    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
-    archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
+    profileFiltered: showAllSources ? [...webuiProfileFiltered, ...cliProfileFiltered] : (showCliOnly ? cliProfileFiltered : webuiProfileFiltered),
+    sessionsRaw: showAllSources ? [...webuiSessionsRaw, ...cliSessionsRaw] : (showCliOnly ? cliSessionsRaw : webuiSessionsRaw),
+    archivedCount: showAllSources
+      ? Math.max(webuiArchivedCount, Number(_archivedWebuiCount||0)) + Math.max(cliArchivedCount, Number(_archivedCliCount||0))
+      : Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
@@ -7375,13 +7415,15 @@ function renderSessionListFromCache(){
     webuiSessionsRaw,
     cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
+  const isAllSourcesView=_sessionSourceFilter==='all';
+  const referenceRaw=isAllSourcesView?[...webuiReferenceRaw, ...cliReferenceRaw]:(_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw);
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const scopedReferenceRows=isAllSourcesView
+    ? [..._scopedSidebarReferenceRows(false), ..._scopedSidebarReferenceRows(true)]
+    : _scopedSidebarReferenceRows(isCliView);
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ...scopedReferenceRows]);
   // Server-provided source bucket counts are authoritative for the current
-  // payload. When present, skip the expensive cross-bucket render/count pass;
-  // null is a deliberate "not computed" sentinel consumed only by
-  // _sessionSourceTabCount's fallback path below.
+  // payload. When present, skip the expensive cross-bucket render/count pass.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
     ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
     : null;
@@ -7434,8 +7476,8 @@ function renderSessionListFromCache(){
   if(window._showCliSessions || cliSessionCount>0){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
+    for(const filter of ['all','webui','cli']){
+      const count=filter==='all'?(webuiSessionTabCount+cliSessionTabCount):(filter==='cli'?cliSessionTabCount:webuiSessionTabCount);
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');

@@ -106,8 +106,9 @@ function _jumpToMessage(rawIdx) {
   // Row is outside the render window — reload the full session and retry.
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
+  const profileScopeQS = (typeof _sessionDetailProfileScopeQS === 'function') ? _sessionDetailProfileScopeQS(sid) : '';
   api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0&msg_limit=9999')
+      '&messages=1&resolve_model=0&msg_limit=9999' + profileScopeQS)
     .then(function(data) {
       if (!data || !data.session) return;
       if (!S.session || S.session.session_id !== sid) return;  // session switched

@@ -9403,7 +9403,7 @@ from api.run_journal import (
     session_journal_fingerprint,
     stale_interrupted_event,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_state, derive_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -12513,7 +12513,8 @@ def handle_get(handler, parsed) -> bool:
             if _diag: _diag.stage("t1_after_get_session_check")
             s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            all_profiles = _all_profiles_enabled(parsed)
+            if not all_profiles and not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
                     # Valid session owned by a KNOWN other profile: 409 so the
                     # client can offer to switch to it (#5419).
@@ -12881,9 +12882,10 @@ def handle_get(handler, parsed) -> bool:
             # _session_index_marks_was_webui) and the #4911 source ownership
             # gate (via _is_claimable_cli_source) so the two endpoints can't
             # drift on foreign-session semantics.
-            cli_meta = _lookup_cli_session_metadata(sid)
+            all_profiles = _all_profiles_enabled(parsed)
+            cli_meta = _lookup_cli_session_metadata(sid, all_profiles=all_profiles)
             _session_profile = (cli_meta or {}).get("profile") or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            if not all_profiles and not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
                     # Valid CLI/foreign session owned by a KNOWN other profile:
                     # 409 so the client can offer to switch to it (#5419).
@@ -13075,6 +13077,86 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, _session_list_payload_to_response(payload), pretty=False)
         finally:
             diag.finish()
+
+    if parsed.path == "/api/todos":
+        from api.profiles import get_active_profile_name
+
+        settings = load_settings()
+        show_cli_sessions = bool(settings.get("show_cli_sessions"))
+        show_previous_messaging_sessions = bool(
+            settings.get("show_previous_messaging_sessions")
+        )
+        show_cron_sessions = bool(settings.get("show_cron_sessions"))
+        agent_session_source_filter = settings.get("agent_session_source_filter")
+        active_profile = get_active_profile_name()
+        all_profiles = _all_profiles_enabled(parsed)
+        exclude_hidden = _query_flag(parsed, "exclude_hidden")
+        include_archived = _query_flag(parsed, "include_archived")
+        try:
+            limit = max(1, min(500, int(parse_qs(parsed.query).get("limit", ["250"])[0])))
+        except (TypeError, ValueError):
+            limit = 250
+        payload = _build_session_list_cache_payload(
+            active_profile=active_profile,
+            all_profiles=all_profiles,
+            show_cli_sessions=show_cli_sessions,
+            show_previous_messaging_sessions=show_previous_messaging_sessions,
+            show_cron_sessions=show_cron_sessions,
+            include_archived=include_archived,
+            exclude_hidden=exclude_hidden,
+            visible_only=True,
+            source_filter=agent_session_source_filter,
+        )
+        rows = (payload.get("sessions") or [])[:limit]
+        items = []
+        for row in rows:
+            sid = str(row.get("session_id") or "").strip()
+            if not sid:
+                continue
+            try:
+                session = get_session(sid, metadata_only=False)
+            except KeyError:
+                cli_meta = _lookup_cli_session_metadata(sid, all_profiles=all_profiles)
+                session, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
+                if session is None or reason == "was_webui":
+                    continue
+            except Exception:
+                logger.debug("failed to load todo session %s", sid, exc_info=True)
+                continue
+            snapshot = derive_todo_state(getattr(session, "messages", None))
+            if not snapshot or not snapshot.get("todos"):
+                continue
+            todos = snapshot.get("todos") or []
+            open_count = sum(
+                1 for todo in todos
+                if isinstance(todo, dict) and todo.get("status") not in ("completed", "cancelled")
+            )
+            item = {
+                "session_id": sid,
+                "title": getattr(session, "title", None) or row.get("title") or "Untitled",
+                "profile": getattr(session, "profile", None) or row.get("profile") or "default",
+                "updated_at": getattr(session, "updated_at", None) or row.get("updated_at") or 0,
+                "last_message_at": row.get("last_message_at") or getattr(session, "updated_at", None) or 0,
+                "todo_count": len(todos),
+                "open_count": open_count,
+                "todo_state": snapshot,
+                "is_cli_session": bool(row.get("is_cli_session")),
+            }
+            items.append(redact_session_data(item))
+        items.sort(
+            key=lambda item: (
+                item.get("open_count") or 0,
+                item.get("last_message_at") or item.get("updated_at") or 0,
+            ),
+            reverse=True,
+        )
+        return j(handler, {
+            "items": items,
+            "count": len(items),
+            "all_profiles": all_profiles,
+            "active_profile": active_profile,
+            "scanned": len(rows),
+        }, pretty=False)
 
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
