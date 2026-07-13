@@ -10155,7 +10155,7 @@ function syncTopbar(){
       }
     }
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
-    updateTitlebarTokenUsage(null);
+    if(typeof updateTitlebarTokenUsage==='function') updateTitlebarTokenUsage(null);
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
@@ -10185,7 +10185,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
-  refreshTitlebarTokenUsage({force:false});
+  if(typeof refreshTitlebarTokenUsage==='function') refreshTitlebarTokenUsage({force:false});
   if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
