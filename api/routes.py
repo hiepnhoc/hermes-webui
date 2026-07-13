@@ -1680,6 +1680,50 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     raise RuntimeError(message)
 
 
+def _record_manual_cron_run(job_id, success, error=None, delivery_error=None):
+    """Persist manual-run status without consuming or rescheduling the cron.
+
+    ``cron.jobs.mark_job_run`` is the scheduled-fire completion path: it
+    increments ``repeat.completed``, advances ``next_run_at``, and may remove a
+    finite job. A WebUI "Run now" is an extra test/on-demand execution, so it
+    must only update last-run health metadata. Use the cron module's own lock
+    and storage helpers when available; retain the legacy mark_job_run fallback
+    for older deployments and focused test doubles.
+    """
+    import importlib
+
+    cron_jobs = importlib.import_module("cron.jobs")
+    jobs_lock = getattr(cron_jobs, "_jobs_lock", None)
+    load_jobs = getattr(cron_jobs, "load_jobs", None)
+    save_jobs = getattr(cron_jobs, "save_jobs", None)
+    if callable(jobs_lock) and callable(load_jobs) and callable(save_jobs):
+        with jobs_lock():
+            jobs = load_jobs()
+            for index, stored_job in enumerate(jobs):
+                if stored_job.get("id") != job_id:
+                    continue
+                updated = copy.deepcopy(stored_job)
+                now_fn = getattr(cron_jobs, "_hermes_now", None)
+                now = now_fn().isoformat() if callable(now_fn) else time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                )
+                updated["last_run_at"] = now
+                updated["last_status"] = "ok" if success else "error"
+                updated["last_error"] = error if not success else None
+                updated["last_delivery_error"] = delivery_error
+                jobs[index] = updated
+                save_jobs(jobs)
+                return
+        logger.warning("Manual cron metadata update: job_id %s not found", job_id)
+        return
+
+    mark_job_run = cron_jobs.mark_job_run
+    try:
+        mark_job_run(job_id, success, error, delivery_error=delivery_error)
+    except TypeError:
+        mark_job_run(job_id, success, error)
+
+
 def _run_cron_tracked(
     job,
     profile_home=None,
@@ -1695,7 +1739,7 @@ def _run_cron_tracked(
     """
     import importlib
 
-    from cron.jobs import mark_job_run, save_job_output
+    from cron.jobs import save_job_output
 
     _cron_scheduler = importlib.import_module("cron.scheduler")
 
@@ -1748,20 +1792,19 @@ def _run_cron_tracked(
                 _success = False
                 _error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-            try:
-                mark_job_run(job_id, _success, _error, delivery_error=delivery_error)
-            except TypeError:
-                # Older/fake cron.jobs modules used by focused WebUI tests may
-                # not expose the newer delivery_error parameter. Real Hermes
-                # scheduler builds do, so this is only a compatibility shim for
-                # legacy test doubles and deployments.
-                mark_job_run(job_id, _success, _error)
+            _record_manual_cron_run(
+                job_id, _success, _error, delivery_error=delivery_error
+            )
 
         _with_cron_home(profile_home, _persist_success)
-    except Exception as e:
+    except Exception as exc:
         logger.exception("Manual cron run failed for job %s", job_id)
+        failure_error = str(exc)
         try:
-            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))  # noqa: F821  e is bound by the enclosing `except ... as e` and the lambda runs synchronously here
+            _with_cron_home(
+                profile_home,
+                lambda: _record_manual_cron_run(job_id, False, failure_error),
+            )
         except Exception:
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:

@@ -1,5 +1,8 @@
 """Regression tests for manual WebUI cron runs."""
 
+from contextlib import contextmanager
+from datetime import datetime, timezone
+
 
 def _install_cron_fakes(monkeypatch, calls, deliver_result=None, silent_marker="[SILENT]"):
     cron_jobs = type("CronJobs", (), {})()
@@ -133,3 +136,43 @@ def test_manual_cron_run_delivers_failure_notice(monkeypatch):
     assert "boom" in calls[1][2]
     assert calls[2] == ("mark", "job-failed", False, "boom", None)
     assert routes._is_cron_running("job-failed") == (False, 0.0)
+
+
+def test_manual_cron_run_records_status_without_advancing_schedule(monkeypatch):
+    import api.routes as routes
+
+    original = {
+        "id": "job-stable-schedule",
+        "next_run_at": "2026-07-14T15:00:00+07:00",
+        "repeat": {"times": None, "completed": 8},
+        "enabled": True,
+        "state": "scheduled",
+        "schedule": {"kind": "cron", "expr": "0 15 * * *"},
+    }
+    stored = [original.copy()]
+
+    @contextmanager
+    def jobs_lock():
+        yield
+
+    cron_jobs = type("CronJobs", (), {})()
+    cron_jobs._jobs_lock = jobs_lock
+    cron_jobs.load_jobs = lambda: stored
+    cron_jobs.save_jobs = lambda jobs: stored.__setitem__(slice(None), jobs)
+    cron_jobs._hermes_now = lambda: datetime(2026, 7, 13, 11, 30, tzinfo=timezone.utc)
+    cron_jobs.mark_job_run = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("manual runs must not call mark_job_run when metadata-safe storage is available")
+    )
+    monkeypatch.setitem(__import__("sys").modules, "cron.jobs", cron_jobs)
+
+    routes._record_manual_cron_run(
+        "job-stable-schedule", True, None, delivery_error=None
+    )
+
+    saved = stored[0]
+    assert saved["next_run_at"] == original["next_run_at"]
+    assert saved["repeat"] == original["repeat"]
+    assert saved["enabled"] is True
+    assert saved["state"] == "scheduled"
+    assert saved["last_status"] == "ok"
+    assert saved["last_run_at"] == "2026-07-13T11:30:00+00:00"
