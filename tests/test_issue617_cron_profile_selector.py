@@ -225,3 +225,10 @@ def test_cron_profile_selector_source_hooks_present():
     assert ".cron-profile-badge" in css
     assert "cron_profile_server_default" in i18n
     assert "cron_profile_server_default_hint" in i18n
+
+
+def test_cron_schedule_is_cross_profile_visible_by_default():
+    panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+
+    assert "let _showAllCronProfiles = true;" in panels
+    assert "Scheduled jobs are a shared operator control plane" in panels

@@ -359,6 +359,32 @@ def test_channel_version_badge_no_bare_sha_on_experimental(stable_pinned_repo, m
     assert updates.channel_version_badge('stable') == 'v0.52.0'
 
 
+def test_settings_panel_is_the_only_frontend_path_opting_into_channel_badge():
+    """Chat boot must not block on display-only Git version probes."""
+    root = updates.REPO_ROOT
+    routes_source = (root / 'api' / 'routes.py').read_text(encoding='utf-8')
+    panels_source = (root / 'static' / 'panels.js').read_text(encoding='utf-8')
+    assert 'parse_qs(parsed.query).get("include_channel_version", ["0"])[0] == "1"' in routes_source
+    assert "api('/api/settings?include_channel_version=1')" in panels_source
+
+
+def test_channel_version_badge_coalesces_repeated_settings_reads(tmp_path, monkeypatch):
+    """Duplicate opted-in settings reads must not rerun expensive Git probes."""
+    calls = []
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v-test')
+    monkeypatch.setattr(
+        updates,
+        '_run_git',
+        lambda args, cwd: (calls.append((tuple(args), cwd)) or ('v-test', True)),
+    )
+    monkeypatch.setattr(updates, '_dirty_suffix', lambda _path: '-dirty')
+
+    assert updates.channel_version_badge('stable') == 'v-test-dirty'
+    assert updates.channel_version_badge('stable') == 'v-test-dirty'
+    assert len(calls) == 1
+
+
 def test_count_channel_tags_ahead(stable_pinned_repo):
     """The ahead-count helper: 3 exp-v* tags sit ahead of a v0.52.0 HEAD.
 

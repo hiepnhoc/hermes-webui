@@ -271,6 +271,51 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
 
 
+def test_all_profiles_source_change_returns_stale_and_rebuilds_in_background(monkeypatch):
+    """Frequent writes in any profile must not block the aggregate sidebar."""
+    routes._session_list_cache_clear()
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=True,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stale_payload = _session_cache_payload("stale", all_profiles=True)
+    fresh_payload = _session_cache_payload("fresh", all_profiles=True)
+    routes._session_list_cache_set(key, stale_payload)
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_source_stamp",
+        lambda _key: ("changed",),
+    )
+
+    started = threading.Event()
+    release = threading.Event()
+    diag = _StageRecorder()
+
+    def builder():
+        started.set()
+        release.wait()
+        return fresh_payload
+
+    try:
+        result = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+        assert result == stale_payload
+        assert started.wait(1.0)
+        assert "session_list_cache_stale_background_rebuild" in diag.stages
+    finally:
+        release.set()
+
+    cached = None
+    for _ in range(20):
+        cached, _fresh = routes._session_list_cache_get(key, allow_stale=True)
+        if cached == fresh_payload:
+            break
+        threading.Event().wait(0.05)
+    assert cached == fresh_payload
+
+
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
     routes._session_list_cache_clear()
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))

@@ -2697,7 +2697,14 @@ def _get_cached_session_list_payload(
 
     stale = cached  # now actually a stale payload when one exists, else None
     stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
-    if stale is not None and stale_reason != "source":
+    # All-profiles sidebars aggregate several state databases, so unrelated
+    # background writes make their source stamp churn frequently. Returning
+    # stale while one background rebuild refreshes the aggregate keeps polling
+    # responsive; direct WebUI mutations still clear the cache explicitly and
+    # therefore have no stale payload to return. Preserve synchronous source
+    # refreshes for the narrower single-profile view.
+    cache_all_profiles = bool(len(key) > 1 and key[1])
+    if stale is not None and (stale_reason != "source" or cache_all_profiles):
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
             if diag is not None:
@@ -12430,7 +12437,14 @@ def handle_get(handler, parsed) -> bool:
             from api.updates import channel_version_badge, _read_update_channel
             channel = _read_update_channel()
             settings["update_channel"] = channel
-            settings["update_channel_version"] = channel_version_badge(channel)
+            include_channel_version = (
+                parse_qs(parsed.query).get("include_channel_version", ["0"])[0] == "1"
+            )
+            # The channel badge shells out to Git and is display-only. Keep it
+            # off the chat boot path; the Settings panel opts in explicitly.
+            settings["update_channel_version"] = (
+                channel_version_badge(channel) if include_channel_version else settings.get("webui_version")
+            )
         except Exception:
             pass
         return j(handler, settings)

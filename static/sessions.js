@@ -34,9 +34,13 @@ let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
-// Debounced save — prevents hammering the server on every keystroke.
+// Debounced save — coalesce normal typing bursts before the server has to
+// read and atomically rewrite the session sidecar. Session files can be several
+// megabytes, so a sub-second delay causes repeated 200-400ms writes while the
+// user is still typing. Session switches still flush immediately via
+// _saveComposerDraftNow().
 let _draftSaveTimer = null;
-const _DRAFT_SAVE_DELAY_MS = 400;
+const _DRAFT_SAVE_DELAY_MS = 1500;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
@@ -3003,7 +3007,12 @@ function _messageReloadLimitForSession(sid){
       const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
       const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
       const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
-      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+      // msg_limit is a VISIBLE transcript-row budget. Do not feed the raw
+      // loaded-message count back into it: tool-heavy turns can contain dozens
+      // of tool rows for only one or two visible user/assistant rows. Using the
+      // raw count made a 30-row initial window expand to 100+ visible rows on a
+      // same-session refresh, producing multi-megabyte responses and huge DOMs.
+      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount+appendedMessageCount);
     }
   }
   return _INITIAL_MSG_LIMIT;

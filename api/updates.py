@@ -42,6 +42,9 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+_CHANNEL_BADGE_CACHE_TTL = 5.0
+_channel_badge_cache: dict[tuple[str, str, str], tuple[float, str]] = {}
+_channel_badge_cache_lock = threading.Lock()
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -717,22 +720,34 @@ def channel_version_badge(channel=None) -> str:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
-    # The current version is channel-INDEPENDENT — it's just what's installed. The
-    # channel only picks which tag family we compare AGAINST for updates. On a
-    # stable-tagged install (e.g. HEAD == v0.52.0) that opts into Experimental, no
-    # ``exp-v*`` tag is reachable BEHIND HEAD (the exp tags sit ahead on master), so
-    # ``--always`` would fall through to a bare SHA and render "WebUI: d4e80b45 ·
-    # Experimental" instead of the real installed version. Falling back to the
-    # channel-neutral WEBUI_VERSION keeps the badge showing "v0.52.0 · Experimental".
-    # (#5862)
-    out, ok = _run_git(
-        ['describe', '--tags', '--match', _channel_tag_glob(channel)],
-        REPO_ROOT,
-    )
-    if ok and out:
-        return out + _dirty_suffix(REPO_ROOT)
-    return WEBUI_VERSION
+    cache_key = (channel, str(REPO_ROOT), str(WEBUI_VERSION))
+    now = time.monotonic()
+    # Boot requests /api/settings more than once. This display-only badge runs
+    # both `git describe` and a dirty-tree check, which takes hundreds of
+    # milliseconds on large worktrees. Serialize the first lookup and reuse it
+    # briefly; a dirty badge lag of at most five seconds is preferable to
+    # blocking every settings request on Git I/O.
+    with _channel_badge_cache_lock:
+        cached = _channel_badge_cache.get(cache_key)
+        if cached is not None and (now - cached[0]) < _CHANNEL_BADGE_CACHE_TTL:
+            return cached[1]
+
+        # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
+        # The current version is channel-INDEPENDENT — it's just what's installed. The
+        # channel only picks which tag family we compare AGAINST for updates. On a
+        # stable-tagged install (e.g. HEAD == v0.52.0) that opts into Experimental, no
+        # ``exp-v*`` tag is reachable BEHIND HEAD (the exp tags sit ahead on master), so
+        # ``--always`` would fall through to a bare SHA and render "WebUI: d4e80b45 ·
+        # Experimental" instead of the real installed version. Falling back to the
+        # channel-neutral WEBUI_VERSION keeps the badge showing "v0.52.0 · Experimental".
+        # (#5862)
+        out, ok = _run_git(
+            ['describe', '--tags', '--match', _channel_tag_glob(channel)],
+            REPO_ROOT,
+        )
+        result = out + _dirty_suffix(REPO_ROOT) if ok and out else WEBUI_VERSION
+        _channel_badge_cache[cache_key] = (time.monotonic(), result)
+        return result
 
 
 def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):

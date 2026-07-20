@@ -414,8 +414,8 @@ def test_same_session_force_reload_preserves_non_empty_composer_input():
     assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});" in SESSIONS_JS
 
 
-def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
-    """Same-session force refresh must not collapse a long transcript to the tail."""
+def test_same_session_force_reload_keeps_visible_transcript_width_without_tool_row_inflation():
+    """Refresh preserves visible width without treating tool rows as visible rows."""
     assert "let _sameSessionForceReloadHint = null;" in SESSIONS_JS
     assert "function _captureSameSessionForceReloadHint(sid)" in SESSIONS_JS
     assert "if(!sid || _sameSessionForceReloadHint.session_id===sid) _sameSessionForceReloadHint=null;" in SESSIONS_JS
@@ -425,7 +425,8 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "function _messageReloadLimitForSession(sid)" in SESSIONS_JS
     assert "if(!hint.truncated) return null;" in SESSIONS_JS
     assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
-    assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
+    assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount+appendedMessageCount);" in SESSIONS_JS
+    assert "loadedMessageCount+appendedMessageCount" not in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     assert "const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';" in SESSIONS_JS
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
@@ -439,6 +440,14 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert capture_pos < clear_pos < reset_pos
     assert "const sameSessionForceReload = forceReload && currentSid===sid;" in load_body
     assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)" in load_body
+
+
+def test_composer_draft_autosave_coalesces_expensive_session_rewrites():
+    """Typing pauses shorter than one second must not rewrite large sidecars."""
+    match = re.search(r"const _DRAFT_SAVE_DELAY_MS = (\d+);", SESSIONS_JS)
+    assert match is not None
+    assert int(match.group(1)) >= 1000
+    assert "_saveComposerDraftNow" in SESSIONS_JS
 
 
 def test_same_width_force_reload_invalidates_visible_message_cache():

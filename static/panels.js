@@ -26,7 +26,9 @@ let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
-let _showAllCronProfiles = false;
+// HiGa control-plane policy: scheduled jobs may execute as specialist profiles,
+// but operators should always see the complete schedule across profiles.
+let _showAllCronProfiles = true;
 let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
@@ -6736,9 +6738,9 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
-  // Cross-profile cron visibility is an active-profile opt-in; never carry it
-  // into the next profile when the Tasks panel wasn't the visible panel.
-  _showAllCronProfiles = false;
+  // Scheduled jobs are a shared operator control plane. Keep the complete
+  // cross-profile schedule visible when switching the active chat profile.
+  _showAllCronProfiles = true;
   _cronOtherProfileCount = 0;
   _cronPreFormDetail = null;
   _editingCronId = null;
@@ -9057,7 +9059,7 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
 
 async function loadSettingsPanel(){
   try{
-    const settings=await api('/api/settings');
+    const settings=await api('/api/settings?include_channel_version=1');
     checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
