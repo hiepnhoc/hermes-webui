@@ -10165,10 +10165,10 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
-  if(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention()){
-    document.title='● '+document.title;
-  }
+  // Keep browser/PWA branding stable. The conversation title remains visible
+  // in the in-app titlebar and sidebar, but must not replace the browser tab
+  // title configured by the operator (for example, "My Hermes").
+  document.title=assistantDisplayName();
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
     let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';

@@ -91,8 +91,10 @@ function syncAppTitlebar() {
 
   titleEl.textContent = mainText;
   if (panel !== 'chat') {
+    // Panel names belong in the in-app titlebar. Keep the browser tab on the
+    // configured assistant/app name so navigation cannot overwrite branding.
     const bot = typeof assistantDisplayName === 'function' ? assistantDisplayName() : '';
-    document.title = bot ? mainText + ' \u2014 ' + bot : mainText;
+    document.title = bot || mainText;
   }
   if (subEl) {
     if (subText) {
