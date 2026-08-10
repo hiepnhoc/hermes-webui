@@ -9616,6 +9616,8 @@ async function loadSettingsPanel(){
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'vi-VN-HoaiMyNeural',label:'Hoài My (Vietnamese, Female)'},
+          {value:'vi-VN-NamMinhNeural',label:'Nam Minh (Vietnamese, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
         edgeVoices.forEach(v=>{

@@ -110,5 +110,14 @@ def test_voice_mode_preflights_and_routes_permission_errors_through_shared_helpe
     )
     assert "_micOriginNeedsSecureContext()" in start_body
     assert "showToast(t('mic_insecure_origin'))" in start_body
-    assert "_micToastKeyForRecognitionError(event.error)" in start_body
-    assert "messageKey?t(messageKey):t('mic_error')+event.error" in start_body
+
+    # Browser SpeechRecognition is now a fallback behind local MediaRecorder STT,
+    # so its shared error routing lives in _startBrowserListening rather than in
+    # the top-level _startListening dispatcher.
+    browser_body = _slice_between(
+        BOOT_JS,
+        "function _startBrowserListening(){",
+        "\n  async function _startServerListening(){",
+    )
+    assert "_micToastKeyForRecognitionError(event.error)" in browser_body
+    assert "messageKey?t(messageKey):t('mic_error')+event.error" in browser_body

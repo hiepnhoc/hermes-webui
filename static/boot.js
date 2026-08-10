@@ -1413,7 +1413,9 @@ window._hermesTtsSynth=function(id, text, opts){
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  const hasSTT=!(!SpeechRecognition);
+  const VoiceAudioContext=window.AudioContext||window.webkitAudioContext;
+  const _voiceCanRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder&&VoiceAudioContext);
+  const hasSTT=!!(SpeechRecognition||_voiceCanRecordAudio);
   const hasTTS=!!('speechSynthesis' in window);
 
   // Need both STT and TTS for turn-based voice mode
@@ -1451,6 +1453,19 @@ window._hermesTtsSynth=function(id, text, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+  let _voiceRecorder=null;
+  let _voiceStream=null;
+  let _voiceAudioContext=null;
+  let _voiceAnalyser=null;
+  let _voiceSilenceInterval=null;
+  let _voiceCaptureGeneration=0;
+  let _serverVoiceSttAvailable=false;
+  const _serverVoiceSttCapability=_voiceCanRecordAudio
+    ?fetch('api/transcribe/capability',{cache:'no-store'})
+      .then(response=>response.ok?response.json():null)
+      .then(data=>{ _serverVoiceSttAvailable=!!(data&&data.available); return _serverVoiceSttAvailable; })
+      .catch(()=>false)
+    :Promise.resolve(false);
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1513,16 +1528,39 @@ window._hermesTtsSynth=function(id, text, opts){
     bar.style.display=_voiceModeActive?(state==='idle'?'none':''):'none';
   }
 
-  function _startListening(){
-    if(!_voiceModeActive) return;
-    if(_micOriginNeedsSecureContext()){
+  function _cleanupVoiceCaptureResources(){
+    if(_voiceSilenceInterval){
+      clearInterval(_voiceSilenceInterval);
+      _voiceSilenceInterval=null;
+    }
+    if(_voiceStream){
+      try{ _voiceStream.getTracks().forEach(track=>track.stop()); }catch(_){}
+      _voiceStream=null;
+    }
+    if(_voiceAudioContext){
+      try{ _voiceAudioContext.close(); }catch(_){}
+      _voiceAudioContext=null;
+    }
+    _voiceAnalyser=null;
+  }
+
+  function _stopVoiceCapture(invalidate=true){
+    if(invalidate) _voiceCaptureGeneration++;
+    const recorder=_voiceRecorder;
+    _voiceRecorder=null;
+    if(recorder&&recorder.state!=='inactive'){
+      try{ recorder.stop(); }catch(_){}
+    }
+    _cleanupVoiceCaptureResources();
+  }
+
+  function _startBrowserListening(){
+    if(!SpeechRecognition){
       _deactivate();
-      showToast(t('mic_insecure_origin'));
+      showToast(t('mic_network'));
       return;
     }
-    _clearBrowserTtsRecovery();
-    _setState('listening');
-
+    if(!_voiceModeActive) return;
     _recognition=new SpeechRecognition();
     _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
@@ -1591,6 +1629,164 @@ window._hermesTtsSynth=function(id, text, opts){
     }
   }
 
+  async function _startServerListening(){
+    const generation=++_voiceCaptureGeneration;
+    const captureSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+    let stream=null;
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    }catch(err){
+      if(generation!==_voiceCaptureGeneration||!_voiceModeActive) return;
+      _deactivate();
+      const denied=err&&(err.name==='NotAllowedError'||err.name==='SecurityError');
+      showToast(denied?t('mic_denied'):t('mic_network'));
+      return;
+    }
+    if(generation!==_voiceCaptureGeneration||!_voiceModeActive){
+      try{ stream.getTracks().forEach(track=>track.stop()); }catch(_){}
+      return;
+    }
+
+    _voiceStream=stream;
+    const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg','audio/mp4'];
+    const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
+    let recorder=null;
+    try{
+      recorder=new MediaRecorder(stream,mimeType?{mimeType}:undefined);
+    }catch(_err){
+      _cleanupVoiceCaptureResources();
+      _setState('listening');
+      if(_voiceModeActive) _startBrowserListening();
+      return;
+    }
+    _voiceRecorder=recorder;
+    const chunks=[];
+    let speechStarted=false;
+    let lastSoundAt=0;
+    const captureStartedAt=performance.now();
+
+    recorder.ondataavailable=event=>{ if(event.data&&event.data.size) chunks.push(event.data); };
+    recorder.onerror=()=>{
+      if(generation!==_voiceCaptureGeneration) return;
+      _stopVoiceCapture(true);
+      if(_voiceModeActive) _startBrowserListening();
+    };
+    recorder.onstop=async()=>{
+      if(_voiceRecorder===recorder) _voiceRecorder=null;
+      // A stale recorder may finish after the user toggles voice mode or a new
+      // capture starts. Its resources were already released by
+      // _stopVoiceCapture(); never let that late callback close the new stream.
+      if(generation!==_voiceCaptureGeneration||!_voiceModeActive) return;
+      _cleanupVoiceCaptureResources();
+      const blob=new Blob(chunks,{type:recorder.mimeType||mimeType||'audio/webm'});
+      if(!blob.size){
+        setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
+        return;
+      }
+      _setState('thinking');
+      try{
+        const blobType=String(blob.type||'').toLowerCase();
+        const ext=blobType.includes('ogg')?'ogg':blobType.includes('mp4')?'m4a':blobType.includes('mpeg')?'mp3':'webm';
+        const form=new FormData();
+        form.append('file',new File([blob],`voice-mode.${ext}`,{type:blob.type||`audio/${ext}`}));
+        const response=await fetch('api/transcribe',{method:'POST',body:form});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok) throw new Error(data.error||'Transcription failed');
+        if(generation!==_voiceCaptureGeneration||!_voiceModeActive) return;
+        const currentSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+        if(captureSid!==currentSid){
+          _setState('listening');
+          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
+          return;
+        }
+        const transcript=String(data.transcript||'').trim();
+        if(!transcript){
+          _setState('listening');
+          setTimeout(()=>{ if(_voiceModeActive) _startListening(); },300);
+          return;
+        }
+        ta.value=transcript;
+        autoResize();
+        _voiceModeSend();
+      }catch(_err){
+        if(generation!==_voiceCaptureGeneration||!_voiceModeActive) return;
+        showToast(t('mic_network'));
+        _setState('listening');
+        setTimeout(()=>{ if(_voiceModeActive) _startBrowserListening(); },500);
+      }
+    };
+
+    try{
+      _voiceAudioContext=new VoiceAudioContext();
+      if(_voiceAudioContext.state==='suspended') await _voiceAudioContext.resume();
+      const source=_voiceAudioContext.createMediaStreamSource(stream);
+      _voiceAnalyser=_voiceAudioContext.createAnalyser();
+      _voiceAnalyser.fftSize=2048;
+      source.connect(_voiceAnalyser);
+      const samples=new Uint8Array(_voiceAnalyser.fftSize);
+      const monitor=()=>{
+        if(generation!==_voiceCaptureGeneration||!_voiceModeActive||recorder.state==='inactive') return;
+        _voiceAnalyser.getByteTimeDomainData(samples);
+        let sum=0;
+        for(let i=0;i<samples.length;i++){
+          const normalized=(samples[i]-128)/128;
+          sum+=normalized*normalized;
+        }
+        const rms=Math.sqrt(sum/samples.length);
+        const now=performance.now();
+        if(rms>0.022){
+          speechStarted=true;
+          lastSoundAt=now;
+        }
+        if(speechStarted&&now-lastSoundAt>=_voiceSilenceMs()){
+          try{ recorder.stop(); }catch(_){}
+          return;
+        }
+        // Some built-in/laptop microphones report a very low RMS level even
+        // while speech is clearly present. Do not wait forever for the fixed
+        // threshold: after six seconds, submit what we have and let Whisper's
+        // VAD decide whether it contains speech.
+        if(!speechStarted&&now-captureStartedAt>=6000){
+          try{ recorder.stop(); }catch(_){}
+          return;
+        }
+        if(now-captureStartedAt>=15000){
+          try{ recorder.stop(); }catch(_){}
+          return;
+        }
+      };
+      recorder.start(250);
+      // Unlike requestAnimationFrame, this still enforces silence and hard
+      // capture limits when the user backgrounds the tab.
+      _voiceSilenceInterval=setInterval(monitor,100);
+    }catch(_err){
+      _stopVoiceCapture(true);
+      if(_voiceModeActive) _startBrowserListening();
+    }
+  }
+
+  async function _startListening(){
+    if(!_voiceModeActive) return;
+    if(_micOriginNeedsSecureContext()){
+      _deactivate();
+      showToast(t('mic_insecure_origin'));
+      return;
+    }
+    _clearBrowserTtsRecovery();
+    _setState('listening');
+    try{ if(_recognition) _recognition.abort(); }catch(_){}
+    _recognition=null;
+    _stopVoiceCapture(true);
+    const startGeneration=_voiceCaptureGeneration;
+    const serverSttAvailable=_serverVoiceSttAvailable||await _serverVoiceSttCapability;
+    if(!_voiceModeActive||startGeneration!==_voiceCaptureGeneration) return;
+    if(_voiceCanRecordAudio&&serverSttAvailable){
+      void _startServerListening();
+      return;
+    }
+    _startBrowserListening();
+  }
+
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
     const text=(ta.value||'').trim();
@@ -1601,8 +1797,9 @@ window._hermesTtsSynth=function(id, text, opts){
     }
     _setState('thinking');
     // Pin the active session id so the TTS callback won't speak a different
-    // session's reply if the user navigates away mid-stream.
+    // session's reply if the user navigated away mid-stream.
     _voiceModeThinkingSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+    _stopVoiceCapture(true);
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     // send() is global from boot.js
@@ -1919,6 +2116,7 @@ window._hermesTtsSynth=function(id, text, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _clearBrowserTtsRecovery();
+    _stopVoiceCapture(true);
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();
