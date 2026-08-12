@@ -2981,16 +2981,15 @@
   .composer-footer.cf-icons .composer-left > *{flex-shrink:0;}
   .composer-footer.cf-icons .composer-profile-wrap,
   .composer-footer.cf-icons .composer-ws-wrap{flex:0 0 auto;}
-  .composer-footer.cf-icons .composer-profile-label,
   .composer-footer.cf-icons .composer-profile-chevron,
-  .composer-footer.cf-icons #composerProfileLabel{display:none;}
-  .composer-footer.cf-icons .composer-profile-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
+  .composer-footer.cf-icons .composer-model-chevron{display:none;}
+  .composer-footer.cf-icons .composer-profile-chip{box-sizing:border-box;max-width:150px;min-height:36px;padding:7px 9px;gap:6px;font-size:11px;}
+  .composer-footer.cf-icons .composer-profile-label{display:block;max-width:104px;}
   .composer-footer.cf-icons .composer-workspace-label,
   .composer-footer.cf-icons #composerWorkspaceLabel{display:none;}
   .composer-footer.cf-icons .composer-workspace-chip{padding-left:8px;padding-right:8px;gap:2px;}
-  .composer-footer.cf-icons .composer-model-label,
-  .composer-footer.cf-icons #composerModelLabel{display:none;}
-  .composer-footer.cf-icons .composer-model-chip{max-width:none;padding-left:10px;padding-right:8px;gap:4px;}
+  .composer-footer.cf-icons .composer-model-chip{max-width:190px;min-height:36px;padding:7px 9px;gap:6px;}
+  .composer-footer.cf-icons .composer-model-label{display:block;max-width:148px;}
   .composer-footer.cf-icons #btnSavedPrompts,
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}

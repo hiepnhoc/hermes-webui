@@ -4448,7 +4448,8 @@ window.addEventListener('resize',()=>{
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
-//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+//   (none) full labels · .cf-icons compact secondary controls while preserving
+//   the active profile + model identity · .cf-icons.cf-burger mobile menu.
 let _composerFitScheduled=false;
 let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
@@ -4466,7 +4467,12 @@ function _fitComposerFooter(){
   if(!overflows()) return;
   footer.classList.add('cf-icons');
   if(!overflows()) return;
-  footer.classList.add('cf-burger');
+  // On desktop/laptop widths, keep the compact row horizontally scrollable
+  // instead of hiding the two pieces of information users need before every
+  // send: which profile (agent) and which model are active. The shared config
+  // menu remains the last-resort treatment for genuinely narrow/mobile
+  // composers where touch-sized controls cannot fit safely.
+  if(footer.clientWidth<=640) footer.classList.add('cf-burger');
 }
 window._fitComposerFooter=_fitComposerFooter;
 

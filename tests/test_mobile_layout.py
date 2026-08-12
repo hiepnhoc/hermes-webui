@@ -365,20 +365,26 @@ def test_composer_controls_switch_to_fit_stage_classes():
         "_fitComposerFooter() should toggle the compact stage classes"
 
     for selector in (
-        ".composer-footer.cf-icons .composer-profile-label",
         ".composer-footer.cf-icons .composer-profile-chevron",
-        ".composer-footer.cf-icons #composerProfileLabel",
         ".composer-footer.cf-icons .composer-workspace-label",
         ".composer-footer.cf-icons #composerWorkspaceLabel",
-        ".composer-footer.cf-icons .composer-model-label",
-        ".composer-footer.cf-icons #composerModelLabel",
+        ".composer-footer.cf-icons .composer-model-chevron",
         ".composer-footer.cf-icons .composer-profile-chip",
+        ".composer-footer.cf-icons .composer-profile-label",
         ".composer-footer.cf-icons .composer-model-chip",
+        ".composer-footer.cf-icons .composer-model-label",
         ".composer-footer.cf-icons .composer-divider",
     ):
         assert selector in CSS, f"{selector} should be present in the .cf-icons rules"
-    assert ".composer-footer.cf-icons .composer-profile-chip{box-sizing:border-box;width:44px" in CSS, \
-        ".cf-icons should collapse the profile chip to an icon-sized control"
+    assert ".composer-footer.cf-icons .composer-profile-label{display:block;max-width:104px" in CSS, \
+        ".cf-icons should keep the active profile name visible"
+    assert ".composer-footer.cf-icons .composer-model-label{display:block;max-width:148px" in CSS, \
+        ".cf-icons should keep the active model name visible"
+    css_ns = CSS.replace(" ", "")
+    assert ".composer-footer.cf-icons#composerProfileLabel{display:none" not in css_ns, \
+        ".cf-icons must not hide the active profile identity"
+    assert ".composer-footer.cf-icons#composerModelLabel{display:none" not in css_ns, \
+        ".cf-icons must not hide the active model identity"
     assert ".composer-footer.cf-icons .composer-workspace-chip{display:none!important" not in CSS.replace(" ", ""), \
         ".cf-icons should keep the workspace switch visible rather than blanking it"
 
@@ -402,6 +408,8 @@ def test_composer_controls_switch_to_fit_stage_classes():
         ".cf-burger must fold the inline quota chip into the shared config menu"
     assert ".composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important" in CSS, \
         ".cf-burger must expose the config button even on wider viewports"
+    assert "if(footer.clientWidth<=640) footer.classList.add('cf-burger');" in fit_body, \
+        ".cf-burger should be reserved for genuinely narrow composer widths"
 
     # Regression intent:
     # - this measured rule should not depend on right-panel open/closed state.
